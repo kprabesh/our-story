@@ -567,49 +567,51 @@ function checkPwd(){
 }
 function startApp(){
   applyTheme();
-  // Load cache first for instant display
+  // Show cached photos instantly while user signs in
   const c=loadCache();
   if(c?.items?.length){allItems=c.items;renderAll(allItems);}
-  // Then init Google auth
+  // Init Google auth — wait for GSI library to load
   waitForGsi();
 }
+
 function waitForGsi(){
-  if(typeof google==='undefined'){setTimeout(waitForGsi,200);return;}
+  if(typeof google==='undefined'||!google.accounts){
+    setTimeout(waitForGsi,300);return;
+  }
+  // Single clean tokenClient — no silent attempt (blocked by browsers)
   tokenClient=google.accounts.oauth2.initTokenClient({
-    client_id:CLIENT_ID,scope:SCOPES,
-    callback:(resp)=>{
-      if(resp.error){showToast('Sign-in failed: '+resp.error);return;}
-      accessToken=resp.access_token;
-      tokenExpiry=Date.now()+(resp.expires_in*1000);
-      document.getElementById('glogin').classList.remove('show');
-      loadDrive();
-    }
+    client_id:CLIENT_ID,
+    scope:SCOPES,
+    callback:handleGoogleToken,
   });
-  // Try silent sign-in first
-  google.accounts.oauth2.initTokenClient({
-    client_id:CLIENT_ID,scope:SCOPES,prompt:'none',
-    callback:(resp)=>{
-      if(resp.error||!resp.access_token){
-        // Need user interaction — show sign in if no cache
-        if(!allItems.length) document.getElementById('glogin').classList.add('show');
-      } else {
-        accessToken=resp.access_token;
-        tokenExpiry=Date.now()+(resp.expires_in*1000);
-        loadDrive();
-      }
-    }
-  }).requestAccessToken();
+  // Always show sign-in screen (user must tap once per session)
+  document.getElementById('glogin').classList.add('show');
+}
+
+function handleGoogleToken(resp){
+  if(resp.error){
+    showToast('Sign-in failed — try again');
+    document.getElementById('glogin').classList.add('show');
+    return;
+  }
+  accessToken=resp.access_token;
+  tokenExpiry=Date.now()+(resp.expires_in*1000);
+  document.getElementById('glogin').classList.remove('show');
+  loadDrive();
 }
 
 function signIn(){
-  if(!tokenClient){showToast('Still loading, please wait...');return;}
+  if(!tokenClient){
+    showToast('Still loading, please wait a moment...');
+    setTimeout(signIn, 500); return;
+  }
   tokenClient.requestAccessToken({prompt:'select_account'});
 }
 function signOut(){
   if(accessToken) google.accounts.oauth2.revoke(accessToken,()=>{});
-  accessToken=null;tokenExpiry=0;
+  accessToken=null; tokenExpiry=0;
   document.getElementById('glogin').classList.add('show');
-  closeSettings();showToast('Signed out');
+  closeSettings(); showToast('Signed out');
 }
 
 // ═══════════════════════════════════════════════
@@ -631,11 +633,14 @@ function applyTheme(){
 //  DRIVE API
 // ═══════════════════════════════════════════════
 async function ensureToken(){
-  if(accessToken&&Date.now()<tokenExpiry-60000) return accessToken;
+  if(accessToken && Date.now()<tokenExpiry-120000) return accessToken;
+  // Token expired — request a fresh one silently (reuses consent, no popup)
   return new Promise((res,rej)=>{
-    tokenClient.callback=(r)=>{
-      if(r.error) rej(r.error);
-      else{accessToken=r.access_token;tokenExpiry=Date.now()+(r.expires_in*1000);res(accessToken);}
+    const savedCallback = tokenClient.callback;
+    tokenClient.callback = (r) => {
+      tokenClient.callback = savedCallback; // restore
+      if(r.error) rej(new Error(r.error));
+      else { accessToken=r.access_token; tokenExpiry=Date.now()+(r.expires_in*1000); res(accessToken); }
     };
     tokenClient.requestAccessToken({prompt:''});
   });
